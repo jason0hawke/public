@@ -1,0 +1,176 @@
+#
+### This file has been sanitized ###
+# This is the README for getInfo.sh and its supporting files
+
+getInfo.sh is a Bash script to get specific information from one or more F5 BigIP Appliances using iControl REST calls.
+
+## Required Files
+
+The following files must be present in the same directory as the script getInfo.sh:
+
+1. getInfo.cfg       - Script-specific settings and table header configuration
+2. hostsInfo.cfg     - Pre-populated arrays of F5 hosts organized by datacenter, environment, and zone
+3. f5LibUtility.sh   - Shared library of common functions used by this and other scripts
+4. f5LibUtility.cfg  - Configuration settings for the library script
+
+### Source Order
+
+Source order matters. The script sources files in this sequence:
+
+    source hostsInfo.cfg        # host arrays and configureEnvVariables function
+    source f5LibUtility.cfg     # library variable declarations and defaults
+    source f5LibUtility.sh      # shared library functions
+    source getInfo.cfg          # script-specific settings (tableHeader arrays, etc.)
+
+## Table Header Arrays
+
+Output columns and widths are controlled by named arrays defined in `getInfo.cfg`.
+Each entry is formatted as `"Label:Width"`. The active array is assigned to `tableHeader`
+at runtime based on the flag passed (or defaults to the base tableHeader if no flag is given).
+
+| Array                 | Flag | Description                                      |
+|-----------------------|------|--------------------------------------------------|
+| `tableHeader`         | none | Default: Host, Version, Platform, Cores, RAMsize, SerialNumber |
+| `memoryTableHeader`   | `-M` | Memory and timeout settings                      |
+| `hardwareTableHeader` | `-H` | Hardware specifics: platform, RAM, cores, CPU, serial number |
+| `softwareTableHeader` | `-S` | Software modules provisioned on the device       |
+
+The `setTable` function in `f5LibUtility.sh` reads whichever array is active and builds
+the format string and column headers dynamically. No library changes are needed when
+adding new header arrays.
+
+## Information Collected
+
+Each field in `getInfo.sh` is gated by a check against the active `headerLabels` array.
+Only the fields present in the active table header are fetched — unused API calls are skipped.
+
+The `stats` associative array is keyed by label name (e.g., `stats["CPU"]`), not by
+position. This means column order in the header arrays is flexible and does not affect
+data collection logic.
+
+| Label              | iControl Endpoint                                      | Notes                              |
+|--------------------|--------------------------------------------------------|------------------------------------|
+| Host               | (none)                                                 | Management IP or FQDN              |
+| Version            | `/mgmt/tm/sys/version`                                 | Includes `(HF)` if Hotfix build    |
+| Platform           | `/mgmt/tm/sys/hardware`                                | Hardware marketing name            |
+| Cores              | reuses hardware call                                   | Number of CPU cores                |
+| RAMsize            | `/mgmt/tm/sys/memory`                                  | Total RAM, displayed in GB         |
+| CPU                | reuses hardware call                                   | CPU model description              |
+| SerialNumber       | `/mgmt/tm/sys/hardware`                                | Chassis serial number              |
+| RESTjavaRAM        | `/mgmt/tm/sys/db/provision.restjavad.extramb`          | Extra RAM allocated to restjavad   |
+| TomcatRAM          | `/mgmt/tm/sys/db/provision.tomcat.extramb`             | Extra RAM allocated to Tomcat      |
+| AuthPAMtimeOut     | `/mgmt/tm/sys/httpd`                                   | HTTP auth PAM idle timeout value   |
+| SoftwareProvisioned| `/mgmt/tm/sys/provision`                               | Provisioned modules and their level|
+| icrd.timeout       | `/mgmt/tm/sys/db/icrd.timeout`                         | iCRD timeout setting               |
+| restjavad.timeout  | `/mgmt/tm/sys/db/restjavad.timeout`                    | restjavad timeout setting          |
+| restnoded.timeout  | `/mgmt/tm/sys/db/restnoded.timeout`                    | restnoded timeout setting          |
+| iapplxrpm.timeout  | `/mgmt/tm/sys/db/iapplxrpm.timeout`                    | iApplxRPM timeout setting          |
+
+`Cores` and `CPU` reuse the `platform_json` response fetched by the `Platform` block — no
+extra API call is made for those fields when `Platform` is also active. `SerialNumber` makes
+its own separate call to `/mgmt/tm/sys/hardware` regardless of whether `Platform` is active.
+
+## Syntax
+
+    getInfo.sh -d <IDC> -e <ENV> -z <Zone> [options]
+
+    IDC is:  east | west | all
+    ENV is:  lab | tst | qa | prod | all
+    Zone is: dmz | int | all
+
+You can use 'all' for any of the above options in multiple combinations.
+
+## Common Usage Examples
+
+    Default output (Host, Version, Platform, Cores, RAMsize, SerialNumber):
+        getInfo.sh -d east -e prod -z dmz
+
+    Hardware table only:
+        getInfo.sh -d east -e prod -z dmz -H
+
+    Memory and timeout settings:
+        getInfo.sh -d east -e prod -z dmz -M
+
+    Software provisioned modules:
+        getInfo.sh -d east -e prod -z dmz -S
+
+    Single host, hardware view:
+        getInfo.sh -h <FQDN or IP> -H
+
+    Connection test:
+        getInfo.sh -d <IDC> -e <ENV> -z <Zone> -t
+
+    Interactive mode (prompts for host):
+        getInfo.sh -i
+
+    Help menu:
+        getInfo.sh -?
+
+## All Flags
+
+    -d    Target data center     (Options: east west all)
+    -e    Target environment     (Options: lab tst qa prod all)
+    -z    Target security zone   (Options: dmz int all)
+    -t    Connection test mode   (ping test + basic iControl call)
+    -i    Interactive mode       (prompts for a single host IP/FQDN)
+    -h    Single target host     (accepts IP or FQDN; FQDN must resolve in DNS)
+    -M    Memory table           (memory and timeout settings)
+    -H    Hardware table         (platform, RAM, cores, CPU, serial number)
+    -S    Software table         (provisioned software modules)
+    -?    Display help
+
+When `-h` is used, `dcVar`, `enVar`, and `zoneVar` are set to `one`, `target`, and `target`
+respectively for email subject purposes.
+
+## Script Functions
+
+### `configureEnvVariables DCVAR ENVAR ZONEVAR`
+Defined in `hostsInfo.cfg`. Accepts the datacenter, environment, and zone arguments and
+sets `$hostArray` to the appropriate pre-populated host list. Called in the main line when
+neither `-i` nor `-h` is used.
+
+### `talk2Hosts`
+Iterates over `$hostArray` using the following per-host sequence: `getAtoken`, `getInfo`,
+`deleteToken`. Wraps the loop with `setTable` and `clearTable` (from `f5LibUtility.sh`) to
+produce a formatted table. Appends host count to the email file when complete. Skips a host
+and logs a WARN if `getAtoken` or `deleteToken` fails.
+
+### `getInfo HOST`
+The primary data-collection function. Checks each label against the active `headerLabels`
+array and only makes iControl REST calls for fields that are needed. Results are stored in
+a local `stats` associative array keyed by label name, then assembled into a row and printed
+via `printf` to both stdout and `$emailFile`. If any required iControl call fails, logs a
+WARN and skips the host.
+
+### `goodBye`
+Logs a completion banner via `myLogger` and exits the script cleanly. Called at the end
+of every execution path.
+
+### `displayHelp`
+Prints usage information via a heredoc, then calls `goodBye`. Triggered by the `-?` flag.
+
+## Modifying Table Headers
+
+To add a new view:
+1. Add a new array to `getInfo.cfg` (e.g., `myTableHeader=("Host:30" "Version:16" "MyField:20")`)
+2. Add a new flag case in the `getopts` block in `getInfo.sh`
+3. Add a data collection block in `getInfo()` gated by the label name
+4. Update the help text and this README
+
+Label names must be unique across all arrays. Duplicate label names in the same array
+will cause silent data overwrites in the `stats` associative array.
+
+## Logging
+
+- System log: entries go to /var/log/messages via the logger command (grep for your userID)
+- Local log:  entries are written to logs/getInfo.sh.log in the script directory
+- Email:      a job completion email is sent with abbreviated log data
+
+## Notes
+
+- Credentials are collected interactively at runtime via the `grabTheKeys` function. Do not store credentials in any config file.
+- Authentication uses token-based auth (`X-F5-Auth-Token`). A token is obtained via `getAtoken` at the start of each host's work and deleted via `deleteToken` at the end.
+- Host arrays are maintained in `hostsInfo.cfg`. This file is shared across multiple scripts and should not be modified casually.
+- Label names in the header arrays must match exactly (case-sensitive) the keys used in the `stats` array in `getInfo.sh`.
+
+# End of README - 03.09.2026 - Jason Hawke

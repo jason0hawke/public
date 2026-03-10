@@ -1,0 +1,148 @@
+#
+### This file has been sanitized ###
+# This is the README for backupEnv.sh and its supporting files
+
+backupEnv.sh is a Bash script to back up one or more F5 BIG-IP appliances by creating UCS
+archives via iControl REST API calls, securely copying the files to a central backup directory,
+and generating a summary email report.
+
+## Required Files
+
+The following files must be present in the same directory as the script backupEnv.sh:
+
+1. backupEnv.cfg    - Script-specific settings (storage paths, timeouts, table header)
+2. hostsInfo.cfg    - Pre-populated arrays of F5 hosts organized by datacenter, environment, and zone
+3. f5LibUtility.sh  - Shared library of common functions used by this and other scripts
+4. f5LibUtility.cfg - Configuration settings for the library script
+
+### Source Order
+
+Source order matters. The script sources files in this sequence:
+
+    source hostsInfo.cfg        # host arrays and configureEnvVariables function
+    source f5LibUtility.cfg     # library variable declarations and defaults
+    source f5LibUtility.sh      # shared library functions
+    source backupEnv.cfg        # script-specific settings (tableHeader, paths, timeouts)
+
+## Storage Location
+
+Each run creates a new timestamped subdirectory under `~/f5backups/`:
+
+    ~/f5backups/YYYY.MM.DD.HHMMSS.ucsBackups/
+
+UCS files are named `<host>.saveMyButt.ucs` and stored in that directory.
+After download, the script sets group ownership to `UserGroup` and adds group write
+permissions (`chmod g+w`) for shared access.
+
+Note: `~/f5backups/` should be a symlink to `/foo1/f5backups/` to avoid filling the local disk.
+
+###
+### VERY IMPORTANT - please delete the old backups when you're done!!!
+###
+
+## Syntax
+
+    backupEnv.sh -d <IDC> -e <ENV> -z <Zone>
+
+    IDC is:  east | west | all
+    ENV is:  lab | tst | qa | prod | all
+    Zone is: dmz | int | all
+
+You can use 'all' for any of the above options in multiple combinations.
+
+## Common Usage Examples
+
+    To run against a target group:      backupEnv.sh -d east -e prod -z dmz
+    To check your connections:          backupEnv.sh -d <IDC> -e <ENV> -z <Zone> -t
+    To invoke interactive mode:         backupEnv.sh -i
+    To target a specific host:          backupEnv.sh -h <FQDN or IP>
+    To see the help menu:               backupEnv.sh -?
+
+## All Flags
+
+    -d    Target data center     (Options: east west all)
+    -e    Target environment     (Options: lab tst qa prod all)
+    -z    Target security zone   (Options: dmz int all)
+    -t    Connection test mode   (ping test + basic iControl call)
+    -i    Interactive mode       (prompts for a single host IP/FQDN)
+    -h    Single target host     (accepts IP or FQDN; FQDN must resolve in DNS)
+    -?    Display help
+
+When `-h` is used, `dcVar`, `enVar`, and `zoneVar` are set to `one`, `target`, and `target`
+respectively for email subject purposes.
+
+## Script Functions
+
+### `configureEnvVariables DCVAR ENVAR ZONEVAR`
+Defined in `hostsInfo.cfg`. Sets `$hostArray` to the appropriate pre-populated host list
+based on the datacenter, environment, and zone arguments. Called in the main line when
+neither `-i` nor `-h` is used.
+
+### `talk2Hosts`
+Iterates over `$hostArray`, calling `saveMyButt` for each host. If `saveMyButt` succeeds,
+calls `grabFiles` to copy the UCS; if it fails, logs a warning and skips the file copy for
+that host. After all hosts are processed, calls `printSummaryTable` then `fileList`.
+
+### `saveMyButt HOST`
+The primary UCS backup workflow for a single host:
+1. POSTs to `/mgmt/tm/task/sys/ucs` to create the backup task (saves to `/var/local/ucs/saveMyButt.ucs`)
+2. PUTs to `/mgmt/tm/task/sys/ucs/$taskID` with `_taskState: VALIDATING` to activate the task
+3. Polls task status via `waitForTask` until `_taskState == COMPLETED` or timeout (600s, 5s poll interval)
+4. Buffers a summary row via `addTableRow` with host, task status, and job duration
+5. Returns 0 on success, 1 on failure (file copy is skipped by `talk2Hosts` on failure)
+
+### `grabFiles HOST`
+SCPs the completed UCS file from `/var/local/ucs/saveMyButt.ucs` on the F5 to
+`$targetDir/<host>.saveMyButt.ucs` on the local host using `sshpass`. Sets group ownership
+to `UserGroup` and adds group write permissions after download.
+
+### `fileList`
+Lists all `.ucs` files in `$targetDir` to stdout and appends the list along with file sizes
+(`du -sh`) to the email report. Also appends a reminder to delete old backup files.
+
+### `goodBye`
+Prints a reminder to delete old backup files from `$targetPath`, logs a completion banner
+via `myLogger`, and exits the script cleanly. Called at the end of every execution path.
+
+### `displayHelp`
+Prints usage information via a heredoc, then calls `goodBye`. Triggered by the `-?` flag.
+
+## Summary Table
+
+After all hosts are processed, a summary table is printed via `printSummaryTable`:
+
+    tableHeader=("Host:40" "Status:12" "Duration:12")
+
+| Column   | Description                                          |
+|----------|------------------------------------------------------|
+| Host     | F5 management IP or FQDN                             |
+| Status   | Final iControl task state (e.g., `COMPLETED`)        |
+| Duration | Elapsed time for the UCS backup task to complete     |
+
+## External Dependencies
+
+| Tool       | Purpose                                              |
+|------------|------------------------------------------------------|
+| `curl`     | iControl REST API calls (via f5LibUtility.sh)        |
+| `jq`       | JSON parsing of API responses (via f5LibUtility.sh)  |
+| `sshpass`  | Non-interactive SCP of UCS files from F5 devices     |
+| `ping`     | Network connectivity test (connection test mode)     |
+| `sendmail` | Email report delivery (via f5LibUtility.sh)          |
+| `logger`   | Writing entries to syslog (via f5LibUtility.sh)      |
+
+## Logging
+
+- System log: entries go to /var/log/messages via the logger command (grep for your userID)
+- Local log:  entries are written to logs/backupEnv.sh.log in the script directory
+- Email:      a job completion email is sent with the summary table, file list, and sizes
+
+## Notes
+
+- Credentials are collected interactively at runtime via `grabTheKeys`. Do not store credentials
+  in any config file.
+- The UCS file is NOT automatically deleted from the F5 device after download (unlike qkviews).
+  The same fixed filename (`saveMyButt.ucs`) is reused on each run, overwriting the previous file.
+- Host arrays are maintained in `hostsInfo.cfg`. This file is shared across multiple scripts
+  and should not be modified casually.
+
+# End of README - 03.03.2026 - Jason Hawke

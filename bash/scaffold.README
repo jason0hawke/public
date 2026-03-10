@@ -1,0 +1,99 @@
+#
+### This file has been sanitized ###
+# This is the README for scaffold.sh and its supporting files
+
+scaffold.sh is a Bash script to get specific information from one or more F5 BigIP Appliances using iControl REST calls.
+
+## Required Files
+
+The following files must be present in the same directory as the script scaffold.sh:
+
+1. scaffold.cfg       - Script-specific settings and table header configuration
+2. hostsInfo.cfg     - Pre-populated arrays of F5 hosts organized by datacenter, environment, and zone
+3. f5LibUtility.sh   - Shared library of common functions used by this and other scripts
+4. f5LibUtility.cfg  - Configuration settings for the library script
+
+### Source Order
+
+Source order matters. The script sources files in this sequence:
+
+    source hostsInfo.cfg        # host arrays and configureEnvVariables function
+    source f5LibUtility.cfg     # library variable declarations and defaults
+    source f5LibUtility.sh      # shared library functions
+    source scaffold.cfg          # script-specific settings (tableHeader, etc.)
+
+## Information about what the script does:
+
+--- blah blah ---
+
+## Syntax
+
+    scaffold.sh -d <IDC> -e <ENV> -z <Zone>
+
+    IDC is:  east | west | all
+    ENV is:  lab | tst | qa | prod | all
+    Zone is: dmz | int | all
+
+You can use 'all' for any of the above options in multiple combinations.
+
+## Common Usage Examples
+
+    To run against a target group:     scaffold.sh -d east -e prod -z dmz
+    To check your connections:         scaffold.sh -d <IDC> -e <ENV> -z <Zone> -t
+    To invoke interactive mode:        scaffold.sh -i
+    To target a specific host:         scaffold.sh -h <FQDN or IP>
+    To see the help menu:              scaffold.sh -?
+
+## All Flags
+
+    -d    Target data center     (Options: east west all)
+    -e    Target environment     (Options: lab tst qa prod all)
+    -z    Target security zone   (Options: dmz int all)
+    -t    Connection test mode   (ping test + basic iControl call)
+    -i    Interactive mode       (prompts for a single host IP/FQDN)
+    -h    Single target host     (accepts IP or FQDN; FQDN must resolve in DNS)
+    -?    Display help
+
+When `-h` is used, `dcVar`, `enVar`, and `zoneVar` are set to `one`, `target`, and `target`
+respectively for email subject purposes.
+
+## Script Functions
+
+### `configureEnvVariables DCVAR ENVAR ZONEVAR`
+Defined in `hostsInfo.cfg`. Accepts the datacenter, environment, and zone arguments and
+sets `$hostArray` to the appropriate pre-populated host list. Called in the main line when
+neither `-i` nor `-h` is used.
+
+### `talk2Hosts`
+Iterates over `$hostArray` using the following per-host sequence: `getAtoken`, `scaffold`,
+`deleteToken`. Wraps the loop with `setTable` and `clearTable` (from `f5LibUtility.sh`) to
+produce a formatted table. Appends host count to the email file when complete. Skips a host
+and logs a WARN if `getAtoken` or `deleteToken` fails.
+
+### `scaffold HOST`
+The primary data-collection function. Makes iControl REST calls for each field in the
+`tableHeader` array, stores results in a local `stats` associative array keyed by column
+label, then assembles and prints the row via `printf` to both stdout and `$emailFile`.
+If any iControl call fails, logs a WARN and returns early (skipping the host).
+
+### `goodBye`
+Logs a completion banner via `myLogger` and exits the script cleanly. Called at the end
+of every execution path.
+
+### `displayHelp`
+Prints usage information via a heredoc, then calls `goodBye`. Triggered by the `-?` flag.
+
+## Logging
+
+- System log: entries go to /var/log/messages via the logger command (grep for your userID)
+- Local log:  entries are written to logs/scaffold.sh.log in the script directory
+- Email:      a job completion email is sent with abbreviated log data
+
+## Notes
+
+- The tableHeader array in scaffold.cfg defines the output columns and their widths.
+  Adding or removing columns requires updating the array and adjusting data collection in scaffold.sh accordingly.
+- Host arrays are maintained in hostsInfo.cfg. This file is shared across multiple scripts and should not be modified casually.
+- Credentials are collected interactively at runtime via the grabTheKeys function. Do not store credentials in any config file.
+
+# End of README - 00.00.2026 - Jason Hawke

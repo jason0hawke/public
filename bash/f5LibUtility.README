@@ -1,0 +1,358 @@
+#
+### This file has been sanitized ###
+# f5LibUtility.sh
+
+A Bash function library that provides shared utility functions for scripts that administer
+F5 BIG-IP appliances via the iControl REST API.
+
+This is not a standalone script. It is intended to be sourced by a calling script along
+with its companion config file:
+
+    source f5LibUtility.cfg
+    source f5LibUtility.sh
+
+---
+
+## Requirements
+
+### External Tools
+| Tool       | Purpose                              |
+|------------|--------------------------------------|
+| `curl`     | iControl REST API calls              |
+| `jq`       | JSON parsing of API responses        |
+| `ping`     | Network connectivity tests           |
+| `sendmail` | Email report delivery                |
+| `logger`   | Writing entries to syslog            |
+
+### Input Files
+- `hostInfo.cfg` — Pre-populated list of target F5 hosts. Must be loaded by the calling script
+  before sourcing this library.
+- `f5LibUtility.cfg` — Declares and initializes all shared variables used by this library.
+  Must be sourced before `f5LibUtility.sh`.
+
+### Variables Expected from the Calling Script
+The following variables must be set by the calling script before invoking the relevant functions:
+
+| Variable      | Used By                          | Description                                           |
+|---------------|----------------------------------|-------------------------------------------------------|
+| `scriptName`  | `f5LibUtility.cfg`, `myLogger`,  | Name of the calling script; drives `emailFile` and    |
+|               | `constructEmailFile`             | `logFile` paths; must be set before sourcing the cfg  |
+| `hostArray`   | `connectionTest`, `ask`          | Array of F5 host IPs or hostnames to target           |
+| `tableHeader` | `setTable`                       | Array of `"LABEL:WIDTH"` strings defining columns     |
+| `timeOut`     | `waitForTask`                    | Max seconds to poll an async iControl task            |
+| `sleepTime`   | `waitForTask`                    | Seconds to wait between task status polls             |
+| `tokenTime`   | `getAtoken`                      | Token lifetime in seconds; set in `f5LibUtility.cfg`  |
+| `enVar`       | `constructEmailFile`             | Environment name (e.g., prod, qa, tst, lab)           |
+| `zoneVar`     | `constructEmailFile`             | Zone name (e.g., dmz, int)                            |
+| `dcVar`       | `constructEmailFile`             | IDC/datacenter name (e.g., east, west, lab)             |
+| `userName`    | `getAtoken`,                     | Set by `grabTheKeys`; passed to `getAtoken` and used  |
+|               | `constructEmailFile`             | in email subject                                      |
+| `userPassword`| `getAtoken`                      | Set by `grabTheKeys`; passed to `getAtoken` for token |
+|               |                                  | acquisition (not passed directly to `talk2iControl`)  |
+
+The following variables are pre-set by `f5LibUtility.cfg` but can be overridden by the
+calling script after sourcing the cfg:
+
+| Variable       | Default                       | Description                                                      |
+|----------------|-------------------------------|------------------------------------------------------------------|
+| `emailFile`    | `$scriptName.txt`             | Path to the working email composition file                       |
+| `f5_email`     | `admin@example.net` | Email address used for To/From in reports                        |
+| `logDir`       | `logs`                        | Directory where the local log file is written                    |
+| `logFile`      | `$logDir/$scriptName.log`     | Path to the local application log                                |
+| `authProvider` | `tmos`                        | Login provider for token auth (e.g., `tmos`, `radius`, `ldap`)  |
+| `tokenTime`    | `1200`                        | Token lifetime in seconds (max 36000); set before `getAtoken`   |
+| `serviceTimer` | `5`                           | Seconds between `bounceAservice` poll iterations                 |
+| `startTime`    | `15`                          | Seconds to wait before the first service status check            |
+| `breakTime`    | `180`                         | Maximum seconds to poll before giving up on a service restart    |
+| `serviceList`  | `("0")`                       | Services to restart via `bounceAservice`; stub — override in app |
+
+The following variables are declared by `f5LibUtility.cfg` for general use by calling scripts:
+
+| Variable    | Description                                          |
+|-------------|------------------------------------------------------|
+| `label`     | General-purpose label string (e.g., for array keys) |
+| `inputFile` | Path to an optional external input file              |
+
+The following runtime-argument variables are declared by the cfg and typically populated
+by argument parsing in the calling script:
+
+| Variable   | Description                                                              |
+|------------|--------------------------------------------------------------------------|
+| `idcVar`   | Which datacenter to target (e.g., home, east, west)                       |
+| `envVar`   | Which environment to target (e.g., lab, tst, qa, prod)                  |
+| `zoneVar`  | Which security zone (e.g., dmz, int)                                    |
+| `testFlag` | Boolean; when set, indicates a dry-run / test execution                 |
+| `askFlag`  | Interactive mode flag: `1` = prompt for host, `2` = host from CLI arg   |
+
+---
+
+## Functions
+
+### `grabTheKeys`
+Interactively prompts the operator for a username and password. Stores values in `$userName`
+and `$userPassword`. Both fields are required; the script exits with an error if either is empty.
+The password input is silent (no echo to terminal).
+
+    grabTheKeys
+
+---
+
+### `getAtoken HOST USER PASS`
+Obtains a token-based authentication token from the target F5 BIG-IP host. Sets the globals
+`$token` and `$tokenID` for use by `talk2iControl` and `deleteToken`. Also extends the token
+lifetime using the `$tokenTime` value from `f5LibUtility.cfg`. The `$authProvider` variable
+controls which login provider is used (default: `tmos`).
+
+Returns 1 and logs an ERROR if authentication fails or the token cannot be parsed (e.g., bad
+credentials or the host does not support token auth at the expected endpoint).
+
+    getAtoken "$host" "$userName" "$userPassword"
+
+Call this once per host before making any `talk2iControl` calls. Call `deleteToken` when done
+with the host to clean up the token on the device.
+
+---
+
+### `deleteToken HOST`
+Deletes the active authentication token (`$token` / `$tokenID`) from the target F5 BIG-IP host.
+Clears both globals after a successful delete. Should be called at the end of all work on a
+given host to avoid leaving orphaned tokens on the device.
+
+    deleteToken "$host"
+
+---
+
+### `myLogger MESSAGE`
+Writes a message to both the system logger (`logger`) and the local application log file
+(`$logFile`). Syslog errors are suppressed silently. This is the internal logging function
+used by all other library functions.
+
+    myLogger "Starting task on $host"
+
+---
+
+### `manageLog`
+Creates the log directory (`$logDir`) if it does not exist, then rotates the current log file
+to `$logFile.old` (keeping only the current run and the previous one). Logs a start banner.
+Call this once at the beginning of the calling script.
+
+    manageLog
+
+---
+
+### `logError LEVEL HOST MESSAGE`
+Writes a structured log entry to both stderr and the application log via `myLogger`.
+
+    logError "ERROR" "$host" "Something went wrong"
+    logError "WARN"  "$host" "API endpoint not available"
+    logError "INFO"  "SYSTEM" "Starting run"
+
+Output format:
+
+    YYYY-MM-DD HH:MM:SS [LEVEL] [HOST] - MESSAGE
+
+---
+
+### `setTable`
+Initializes a formatted ASCII table for report output. Reads the `$tableHeader` array (format:
+`"LABEL:WIDTH"`) to build column widths, the printf format string (`$FMT`), and header labels.
+Prints the table header and a separator line to stdout and appends them to `$emailFile`.
+
+Expects `$tableHeader`, `$emailFile`, `$FMT`, `$headerLabels`, and `$tableWidth` to be declared
+(as appropriate types) in the calling script or cfg.
+
+Example `tableHeader` definition:
+
+    tableHeader=("HOST:20" "VERSION:15" "STATUS:10")
+
+---
+
+### `clearTable`
+Closes the table started by `setTable`. Prints a closing separator line and appends `</pre>` to
+`$emailFile`. Call this after all table rows have been written.
+
+    clearTable
+
+---
+
+### `printTableRow [COL1] [COL2] ...]`
+Writes one data row immediately to stdout and appends it to `$emailFile`. Pass column values
+as arguments in the same order as `$tableHeader`.
+
+    printTableRow "$host" "SUCCEEDED" "45s"
+
+Use this for streaming output as each host is processed. For a clean summary table after all
+hosts are processed, use `addTableRow` / `printSummaryTable` instead.
+
+---
+
+### `addTableRow [COL1] [COL2] ...`
+Buffers a row in the `$summaryRows` array for later batch printing. Pass column values as
+arguments in the same order as `$tableHeader`.
+
+    addTableRow "$host" "SUCCEEDED" "45s"
+
+---
+
+### `printSummaryTable`
+Prints the complete table — header, all rows buffered by `addTableRow`, and footer — as a
+single clean block. Calls `setTable`, flushes `$summaryRows` to stdout and `$emailFile`,
+calls `clearTable`, then resets `$summaryRows`. Use this when you want to display results
+only after all hosts have been processed.
+
+    printSummaryTable
+
+---
+
+### `waitForTask HOST URI STATUS_FIELD SUCCESS_VALUE`
+Polls an asynchronous iControl task until it reaches a terminal success state or the timeout
+is reached. Displays a live elapsed-time counter in the terminal while waiting.
+
+| Parameter      | Description                                            |
+|----------------|--------------------------------------------------------|
+| `HOST`         | F5 host IP or hostname                                 |
+| `URI`          | Full task URI including the task ID                    |
+| `STATUS_FIELD` | `jq` expression for the status field (e.g. `.status`) |
+| `SUCCESS_VALUE`| The value that indicates completion (e.g. `SUCCEEDED`) |
+
+Sets globals after returning:
+- `$taskStatus` — final status string from the API
+- `$jobDuration` — elapsed time string (e.g. `42s` or `300s (timed out)`)
+
+Requires `$timeOut` and `$sleepTime` to be set by the calling script.
+Returns `0` on success, `1` on timeout or API error.
+
+    waitForTask "$host" "/mgmt/tm/sys/ucs/$taskID" ".status" "SUCCEEDED"
+
+---
+
+### `bounceAservice HOST`
+Restarts one or more BIG-IP services on the target host and polls until each is confirmed
+running or the timeout is reached. Services are restarted in the order defined in the
+`$serviceList` array (configured in `f5LibUtility.cfg` or overridden by the calling script).
+
+| Parameter | Description            |
+|-----------|------------------------|
+| `HOST`    | F5 host IP or hostname |
+
+For each service in `$serviceList`:
+1. Issues a `bigstart restart <service>` command via the `/mgmt/tm/util/bash` endpoint
+2. Waits `$startTime` seconds before polling
+3. Polls `bigstart status <service>` every `$sleepTime` seconds
+4. Declares success when the response contains `run (pid`; logs a WARN and continues if
+   `$breakTime` is reached without that confirmation
+
+Timing variables (`$serviceTimer`, `$startTime`, `$breakTime`) are pre-set by
+`f5LibUtility.cfg`; override them in the calling script if needed.
+
+Returns 1 immediately (with a WARN) if `$serviceList` is empty or contains only the stub
+placeholder `"0"`.
+
+    serviceList=("big3d" "mcpd")
+    bounceAservice "$host"
+
+---
+
+### `talk2iControl HOST URI METHOD [JSON]`
+Makes an authenticated HTTP request to an iControl REST endpoint on a BIG-IP host.
+Outputs the JSON response body on success.
+
+| Parameter | Description                                           |
+|-----------|-------------------------------------------------------|
+| `HOST`    | F5 host IP or hostname                                |
+| `URI`     | iControl REST URI (e.g. `/mgmt/tm/sys/version`)       |
+| `METHOD`  | HTTP method: `GET`, `POST`, `PATCH`, `PUT`, `DELETE`  |
+| `JSON`    | (Optional) JSON body for POST/PATCH/PUT requests      |
+
+HTTP status handling:
+
+| Status   | Behavior                                                                              |
+|----------|---------------------------------------------------------------------------------------|
+| 2xx      | Outputs JSON response body to stdout                                                  |
+| 400      | Logs a WARN and outputs response body; task may be in a terminal state                |
+| 401      | Logs an ERROR (bad credentials); returns exit code 1                                  |
+| 403      | Logs an ERROR (insufficient role/permissions); returns exit code 1                    |
+| 404      | Logs a WARN; returns an empty JSON object `{}`; callers can use `jq '// "N/A"'`      |
+| Other    | Logs an ERROR and returns exit code 1                                                 |
+
+Uses `$token` (set by `getAtoken`) for token-based authentication via the `X-F5-Auth-Token` header.
+TLS certificate verification is skipped (`-sk`).
+
+    version_json=$(talk2iControl "$host" "/mgmt/tm/sys/version" "GET") || { logError "ERROR" "$host" "skipping"; continue; }
+    result_json=$(talk2iControl "$host" "/mgmt/tm/sys/ucs" "POST" '{"name":"backup.ucs"}') || { logError "ERROR" "$host" "UCS creation failed"; continue; }
+
+---
+
+### `constructEmailFile`
+Creates a fresh HTML email file at the path in `$emailFile`. Removes any existing file at that
+path first. The email skeleton includes To/From/Subject headers and a brief environment summary
+using `$f5_email`, `$userName`, `$scriptName`, `$HOSTNAME`, `$enVar`, `$zoneVar`, and `$dcVar`.
+
+    constructEmailFile
+
+---
+
+### `emailReport`
+Appends a closing `<hr>` to `$emailFile`, sends the email via `sendmail -vt`, logs the full
+email content to the application log via `myLogger`, then removes `$emailFile`.
+
+    emailReport
+
+---
+
+### `connectionTest`
+Runs a full connectivity test against every host in `$hostArray`. For each host:
+1. Runs `ping -c 3` to verify network reachability
+2. Calls `talk2iControl` to retrieve the TMOS version via iControl REST
+3. Reports the TMOS version (including Hotfix label if applicable)
+4. Appends all results to the email report
+
+Prompts for credentials via `grabTheKeys`, constructs the email via `constructEmailFile`,
+and sends the final report via `emailReport`. Logs are written throughout.
+
+    connectionTest
+
+---
+
+### `ask`
+Interactive mode. Prompts the operator for a single target host IP/hostname, stores it in
+`$targetHost`, and sets `$hostArray` to contain only that host. Useful for targeting a
+specific device without modifying the host config file.
+
+    ask
+
+---
+
+### `any_key`
+Pauses execution and waits for the operator to press any key before continuing.
+
+    any_key
+
+---
+
+### `writeConfig2Disk HOST`
+Saves the running configuration to disk on the target host by issuing a `save` command via
+iControl REST (`POST /mgmt/tm/sys/config`). Verifies success by checking that the response
+contains `"kind": "tm:sys:config:savestate"`. Prints a status message to stdout and appends
+a confirmation line to `$emailFile`. Logs a WARN and continues if the API call fails or the
+response is unexpected (non-fatal — execution is not halted).
+
+    writeConfig2Disk "$host"
+
+---
+
+## Logging
+
+All library functions write entries via `myLogger`, which sends output to two destinations:
+- **Syslog** — via the system `logger` utility (check `/var/log/messages` or platform equivalent)
+- **Local log file** — `$logDir/$scriptName.log` (typically `logs/<scriptName>.log`)
+
+`manageLog` should be called once at startup to create the log directory and rotate the
+previous log to `.old`.
+
+---
+
+# Created by Jason Hawke on 02.25.2026
+# Edited by Jason Hawke on 03.09.2026
+
+# EOF

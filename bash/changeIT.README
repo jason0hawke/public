@@ -1,0 +1,212 @@
+#
+### This file has been sanitized ###
+# This is the README for changeIT.sh and its supporting files
+
+changeIT.sh is a Bash script to update settings on one or more F5 BigIP Appliances using iControl REST calls.
+
+## Script Objectives
+
+1. Display the settings *before* changes are made.
+2. Make the desired changes to the settings.
+3. Display the settings *after* changes are made to verify success.
+4. Log all actions and results to a log file and send an email report with the results.
+
+## Required Files
+
+The following files must be present in the same directory as the script changeIT.sh:
+
+1. changeIT.cfg       - Script-specific settings, table header configuration, and target new values
+2. hostsInfo.cfg      - Pre-populated arrays of F5 hosts organized by datacenter, environment, and zone
+3. f5LibUtility.sh    - Shared library of common functions used by this and other scripts
+4. f5LibUtility.cfg   - Configuration settings for the library script
+
+### Source Order
+
+Source order matters. The script sources files in this sequence:
+
+    source hostsInfo.cfg        # host arrays and configureEnvVariables function
+    source f5LibUtility.cfg     # library variable declarations and defaults
+    source f5LibUtility.sh      # shared library functions
+    source changeIT.cfg         # script-specific settings (tableHeader, newSettings, etc.)
+
+## Table Header Array
+
+Output columns and widths are controlled by the `tableHeader` array defined in `changeIT.cfg`.
+Each entry is formatted as `"Label:Width"`. There is a single table header for this script.
+
+| Label              | Width | Description                          |
+|--------------------|-------|--------------------------------------|
+| Host               | 30    | Management IP or FQDN                |
+| icrd.timeout       | 17    | iCRD timeout setting                 |
+| restjavad.timeout  | 17    | restjavad timeout setting            |
+| restnoded.timeout  | 17    | restnoded timeout setting            |
+| iapplxrpm.timeout  | 17    | iApplxRPM timeout setting            |
+
+The `setTable` function in `f5LibUtility.sh` reads the active array and builds the format string
+and column headers dynamically.
+
+## Target Settings (newSettings)
+
+The `newSettings` associative array in `changeIT.cfg` defines the values to be applied to each host.
+
+| Setting            | Target Value | iControl Endpoint                          |
+|--------------------|--------------|--------------------------------------------|
+| icrd.timeout       | 180          | `/mgmt/tm/sys/db/icrd.timeout`             |
+| restjavad.timeout  | 300          | `/mgmt/tm/sys/db/restjavad.timeout`        |
+| restnoded.timeout  | 180          | `/mgmt/tm/sys/db/restnoded.timeout`        |
+| iapplxrpm.timeout  | 300          | `/mgmt/tm/sys/db/iapplxrpm.timeout`        |
+
+To target different values, update `newSettings` in `changeIT.cfg`. Do not change the key names
+without also updating the corresponding `stats` array keys in `changeIT.sh`.
+
+## Service Restart List (serviceList)
+
+The `serviceList` array in `changeIT.cfg` defines which BIG-IP services are restarted by
+`bounceAservice` after the settings changes are applied. Services are restarted in the order
+listed.
+
+| Service      | Purpose                                      |
+|--------------|----------------------------------------------|
+| `restjavad`  | REST Java daemon — processes iControl REST   |
+| `restnoded`  | REST Node daemon — supports restjavad        |
+
+To change which services are restarted, update `serviceList` in `changeIT.cfg`. To skip
+restarts entirely, set `serviceList=()` (empty array), which causes `bounceAservice` to
+return immediately with a WARN.
+
+## Syntax
+
+    changeIT.sh -d <IDC> -e <ENV> -z <Zone> [options]
+
+    IDC is:  east | west | all
+    ENV is:  lab | tst | qa | prod | all
+    Zone is: dmz | int | all
+
+You can use 'all' for any of the above options in multiple combinations.
+
+## Common Usage Examples
+
+    Run changes against a target group:
+        changeIT.sh -d east -e prod -z dmz
+
+    Test mode (display current settings only, no changes):
+        changeIT.sh -d east -e prod -z dmz -t
+
+    Single host by IP or FQDN:
+        changeIT.sh -h <FQDN or IP>
+
+    Interactive mode (prompts for a single host):
+        changeIT.sh -i
+
+    Connection test:
+        changeIT.sh -d <IDC> -e <ENV> -z <Zone> -t
+
+    Help menu:
+        changeIT.sh -?
+
+## All Flags
+
+    -d    Target data center     (Options: east west all)
+    -e    Target environment     (Options: lab tst qa prod all)
+    -z    Target security zone   (Options: dmz int all)
+    -t    Test mode              (displays current settings only — no changes are made)
+    -i    Interactive mode       (prompts for a single host IP/FQDN)
+    -h    Single target host     (accepts IP or FQDN; FQDN must resolve in DNS)
+    -?    Display help
+
+When `-h` is used, `dcVar`, `enVar`, and `zoneVar` are set to `one`, `target`, and `target`
+respectively for email subject purposes.
+
+## Script Functions
+
+### `talk2Hosts`
+Iterates over `$hostArray` using the following per-host sequence:
+
+1. `getAtoken` — obtains a token-based auth token for the host
+2. `getInfo` — reads current settings (before)
+3. `changeIT` — applies the new settings
+4. `getInfo` — reads settings again to confirm changes (after)
+5. `writeConfig2Disk` — saves the running config to disk
+6. `bounceAservice` — restarts services listed in `serviceList` (defined in `changeIT.cfg`)
+7. `deleteToken` — cleans up the auth token on the device
+
+Wraps the loop with `setTable` and `clearTable` (from `f5LibUtility.sh`) to produce a formatted
+table. Appends host count to the email file when complete. Skips a host and logs a WARN if any
+step fails.
+
+### `getInfo HOST`
+Reads current settings from the device via iControl REST calls. Checks each label against the
+active `headerLabels` array and only makes API calls for fields that are needed. Results are
+stored in a local `stats` associative array keyed by label name, then assembled into a row and
+printed via `printf` to both stdout and `$emailFile`. If any required iControl call fails, logs
+a WARN and skips the host.
+
+| Label              | iControl Endpoint                          | Notes                     |
+|--------------------|--------------------------------------------|---------------------------|
+| Host               | (none)                                     | Management IP or FQDN     |
+| icrd.timeout       | `/mgmt/tm/sys/db/icrd.timeout`             | iCRD timeout setting      |
+| restjavad.timeout  | `/mgmt/tm/sys/db/restjavad.timeout`        | restjavad timeout setting |
+| restnoded.timeout  | `/mgmt/tm/sys/db/restnoded.timeout`        | restnoded timeout setting |
+| iapplxrpm.timeout  | `/mgmt/tm/sys/db/iapplxrpm.timeout`        | iApplxRPM timeout setting |
+
+### `changeIT HOST`
+Applies the new settings defined in the `newSettings` array from `changeIT.cfg` to the target
+host via iControl REST `PATCH` calls through `talk2iControl`. Each setting is applied
+individually; if any call fails, the host is skipped and a WARN is logged. The actual value
+confirmed by the API response is stored in the `stats` array and written to stdout and
+`$emailFile` in table format. Logs a completion entry via `myLogger` when done.
+
+### `displaySettings HOST`
+Used in test mode (`-t`). Reads the target values from the `newSettings` array and displays
+them in table format without making any changes to the host. Useful for verifying what values
+*would be* applied before running for real.
+
+### `testMode`
+Iterates over `$hostArray` using the following per-host sequence: `getAtoken`, `getInfo`,
+`displaySettings`, `getInfo`, `deleteToken`. No iControl PATCH/PUT calls are made.
+Outputs a message indicating test mode is active.
+
+### `bounceAservice HOST`
+Provided by `f5LibUtility.sh`. Restarts each service in the `$serviceList` array (defined in
+`changeIT.cfg`) via `bigstart restart` on the target host and polls until the service confirms
+running or the timeout expires. See [f5LibUtility.README](f5LibUtility.README) for full details.
+
+### `goodBye`
+Logs a completion banner via `myLogger` and exits the script cleanly. Called at the end
+of every execution path.
+
+### `displayHelp`
+Prints usage information via a heredoc, then calls `goodBye`. Triggered by the `-?` flag.
+
+## Modifying Target Settings
+
+To change the values that will be applied:
+1. Update the `newSettings` array in `changeIT.cfg`
+2. Ensure the keys match the label names in `tableHeader` and the `stats` array keys in `changeIT.sh`
+
+To add a new setting to collect and change:
+1. Add the label and width to `tableHeader` in `changeIT.cfg`
+2. Add the target value to `newSettings` in `changeIT.cfg`
+3. Add a data collection block in `getInfo()` gated by the label name
+4. Add a change block in `changeIT()` gated by the label name
+5. Add a display block in `displaySettings()` reading from `newSettings`
+6. Update the help text and this README
+
+Label names must match exactly (case-sensitive) across `tableHeader`, `newSettings`, and the
+`stats` array keys in `changeIT.sh`.
+
+## Logging
+
+- System log: entries go to /var/log/messages via the logger command (grep for your userID)
+- Local log:  entries are written to logs/changeIT.sh.log in the script directory
+- Email:      a job completion email is sent with abbreviated log data
+
+## Notes
+
+- Credentials are collected interactively at runtime via the `grabTheKeys` function. Do not store credentials in any config file.
+- Authentication uses token-based auth (`X-F5-Auth-Token`). A token is obtained via `getAtoken` at the start of each host's work and deleted via `deleteToken` at the end. This survives `restjavad`/`restnoded` restarts that would break a basic-auth session mid-run.
+- Host arrays are maintained in `hostsInfo.cfg`. This file is shared across multiple scripts and should not be modified casually.
+- Label names in the header array must match exactly (case-sensitive) the keys used in the `stats` array in `changeIT.sh`.
+- The `-t` flag runs test mode: it displays current settings and the intended new values but makes no changes.
+
+# End of README - 03.09.2026 - Jason Hawke
